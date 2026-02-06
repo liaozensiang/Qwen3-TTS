@@ -21,7 +21,9 @@ import onnxruntime
 
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio.compliance.kaldi as kaldi
+# import torchaudio.compliance.kaldi as kaldi
+import librosa
+import numpy as np
 
 from librosa.filters import mel as librosa_mel_fn
 from itertools import accumulate
@@ -142,10 +144,39 @@ class XVectorExtractor(nn.Module):
             norm_audio = self.sox_norm(audio)
 
             norm_audio = torch.from_numpy(copy.deepcopy(norm_audio)).unsqueeze(0)
-            feat = kaldi.fbank(norm_audio,
-                            num_mel_bins=80,
-                            dither=0,
-                            sample_frequency=16000)
+            # feat = kaldi.fbank(norm_audio,
+            #                 num_mel_bins=80,
+            #                 dither=0,
+            #                 sample_frequency=16000)
+            
+            # Helper to replace kaldi.fbank using librosa
+            waveform = norm_audio.squeeze(0).cpu().numpy()
+            
+            # Kaldi uses 25ms window and 10ms shift
+            n_fft = int(0.025 * 16000)
+            hop_length = int(0.010 * 16000)
+            
+            # Compute Mel Spectrogram
+            # Note: kaldi uses slightly different param defaults, trying to match closely
+            mel_spec = librosa.feature.melspectrogram(
+                y=waveform, 
+                sr=16000, 
+                n_fft=n_fft, 
+                hop_length=hop_length, 
+                win_length=n_fft,
+                window='hamming',
+                n_mels=80,
+                fmin=20,     # Standard Kaldi defaults
+                fmax=7600,   # Standard Kaldi defaults (Nyquist is 8000, but often limited)
+                center=False # Kaldi does not pad/center
+            )
+            
+            # Convert to log-mel (add small epsilon to avoid log(0))
+            feat = np.log(mel_spec + 1e-6)
+            
+            # Transpose to (T, D) matches Kaldi output shape
+            feat = torch.from_numpy(feat.T).float()
+
             feat = feat - feat.mean(dim=0, keepdim=True)
             norm_embedding = self.ort_session.run(None, {self.ort_session.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()})[0].flatten()
             norm_embedding = F.normalize(torch.from_numpy(norm_embedding), dim=0)
